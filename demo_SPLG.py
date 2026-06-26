@@ -1,7 +1,9 @@
 import torch
 import os
 import time
+import csv
 from pathlib import Path
+import torch.nn.functional as F
 from lightglue import LightGlue, SuperPoint
 from lightglue.utils import load_image, rbd
 from lightglue import viz2d
@@ -59,6 +61,15 @@ def make_matching_figure(
         plt.close()
     else:
         return fig
+
+
+def resize_frame(image, width=920, height=256):
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+    elif image.dim() == 2:
+        image = image.unsqueeze(0).unsqueeze(0)
+    resized = F.interpolate(image, size=(height, width), mode="bilinear", align_corners=False)
+    return resized.squeeze(0)
     
 torch.set_grad_enabled(False)
 
@@ -78,14 +89,15 @@ offline_imgs = [f for f in os.listdir(offline_folder) if f.endswith('.png')]
 inference_times = []
 confidences = []
 inliers_number = []
+csv_rows = []
 
 # Load online keyframe
-image0 = load_image(online_img_pth).to(device)
+image0 = resize_frame(load_image(online_img_pth).to(device))
 feats0 = extractor.extract(image0)
 
 # Matching pipeline
 for img_name in offline_imgs:
-    image1 = load_image(os.path.join(offline_folder, img_name)).to(device)
+    image1 = resize_frame(load_image(os.path.join(offline_folder, img_name)).to(device))
     feats1 = extractor.extract(image1)
     
     torch.cuda.synchronize() 
@@ -130,6 +142,14 @@ for img_name in offline_imgs:
     
     confidences.append(scores.mean())
     inliers_number.append(len(mkpts0_filtered))
+    csv_rows.append({
+        "row_type": "match",
+        "keyframe": img_name,
+        "matches": len(mkpts0_filtered),
+        "inference_time_ms": f"{inference_time:.3f}",
+        "mean_confidence": f"{scores.mean():.6f}",
+        "threshold": threshold,
+    })
     
     text = ['LightGlue', 'Matches: {}'.format(len(mkpts0_filtered))]
     fig = make_matching_figure(
@@ -146,6 +166,24 @@ for img_name in offline_imgs:
     print(f"Keyframe: {img_name} | Matches: {len(mkpts0_filtered)} | Inf Time {inference_time:.3f}ms")
     
     # print(f"Saved: {out_path}")
+
+summary_csv_path = os.path.join(output_dir, "matching_metrics.csv")
+if inference_times:
+    csv_rows.append({
+        "row_type": "summary",
+        "keyframe": "",
+        "matches": "",
+        "inference_time_ms": f"{sum(inference_times[1:])/(len(inference_times)-1):.3f}" if len(inference_times) > 1 else f"{inference_times[0]:.3f}",
+        "mean_confidence": f"{np.mean(confidences):.6f}",
+        "threshold": threshold,
+        "mean_inliers": f"{np.mean(inliers_number):.3f}",
+    })
+
+with open(summary_csv_path, "w", newline="", encoding="utf-8") as csv_file:
+    fieldnames = ["row_type", "keyframe", "matches", "inference_time_ms", "mean_confidence", "threshold", "mean_inliers"]
+    writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(csv_rows)
 
 print(f"Mean Inference Time: {sum(inference_times[1:])/(len(inference_times)-1):.3f}ms")
 print(f"Mean Confidence: {np.mean(confidences)}")
