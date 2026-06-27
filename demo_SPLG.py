@@ -1,5 +1,6 @@
 import torch
 import os
+import cv2
 import time
 import csv
 from pathlib import Path
@@ -84,12 +85,15 @@ offline_folder = "Offline_Keyframes_Turn2-3/"
 output_dir = "output_matches"
 os.makedirs(output_dir, exist_ok=True)
 
+csv_path = os.path.join(output_dir, "LG_stats.csv")
+
 offline_imgs = [f for f in os.listdir(offline_folder) if f.endswith('.png')]
 
 inference_times = []
 confidences = []
 inliers_number = []
 csv_rows = []
+inliers_geometric_number = []
 
 # Load online keyframe
 image0 = resize_frame(load_image(online_img_pth).to(device))
@@ -140,16 +144,15 @@ for img_name in offline_imgs:
     mkpts1_filtered = m_kpts1[mask]
     color_filtered = color[mask]
     
+    num_inliers = 0
+    if len(mkpts0_filtered) > 8:
+        _, inliers = cv2.findFundamentalMat(mkpts0_filtered, mkpts1_filtered, cv2.USAC_MAGSAC, 0.5, 0.999, 1000)
+        if inliers is not None:
+            num_inliers = int(np.sum(inliers))
+    
+    inliers_geometric_number.append(num_inliers)
     confidences.append(scores.mean())
     inliers_number.append(len(mkpts0_filtered))
-    csv_rows.append({
-        "row_type": "match",
-        "keyframe": img_name,
-        "matches": len(mkpts0_filtered),
-        "inference_time_ms": f"{inference_time:.3f}",
-        "mean_confidence": f"{scores.mean():.6f}",
-        "threshold": threshold,
-    })
     
     text = ['LightGlue', 'Matches: {}'.format(len(mkpts0_filtered))]
     fig = make_matching_figure(
@@ -166,25 +169,41 @@ for img_name in offline_imgs:
     print(f"Keyframe: {img_name} | Matches: {len(mkpts0_filtered)} | Inf Time {inference_time:.3f}ms")
     
     # print(f"Saved: {out_path}")
-
-summary_csv_path = os.path.join(output_dir, "matching_metrics.csv")
-if inference_times:
+    
     csv_rows.append({
-        "row_type": "summary",
-        "keyframe": "",
-        "matches": "",
-        "inference_time_ms": f"{sum(inference_times[1:])/(len(inference_times)-1):.3f}" if len(inference_times) > 1 else f"{inference_times[0]:.3f}",
-        "mean_confidence": f"{np.mean(confidences):.6f}",
-        "threshold": threshold,
-        "mean_inliers": f"{np.mean(inliers_number):.3f}",
+        "image_name": img_name,
+        "conf_min": float(scores.min()),
+        "conf_max": float(scores.max()),
+        "conf_mean": float(scores.mean()),
+        "matches": int(len(mkpts0_filtered)),
+        "inliers": int(num_inliers),
+        "inference_time_ms": float(inference_time),
+        "threshold": float(threshold),
     })
 
-with open(summary_csv_path, "w", newline="", encoding="utf-8") as csv_file:
-    fieldnames = ["row_type", "keyframe", "matches", "inference_time_ms", "mean_confidence", "threshold", "mean_inliers"]
+summary_rows = [
+    {
+        "image_name": "__summary__",
+        "conf_mean": float(np.mean(confidences)),
+        "matches": float(np.mean(inliers_number)),
+        "inliers": float(np.mean(inliers_geometric_number)),
+        "inference_time_ms": float(sum(inference_times[1:])/(len(inference_times)-1)),
+        "threshold": float(threshold),
+        "note": "Mean values",
+    }
+]
+
+fieldnames = ["image_name", "conf_min", "conf_max", "conf_mean", "matches", "inliers", "inference_time_ms", "threshold", "note"]
+
+with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
     writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
     writer.writeheader()
-    writer.writerows(csv_rows)
+    for row in csv_rows:
+        writer.writerow(row)
+    for row in summary_rows:
+        writer.writerow(row)
 
 print(f"Mean Inference Time: {sum(inference_times[1:])/(len(inference_times)-1):.3f}ms")
 print(f"Mean Confidence: {np.mean(confidences)}")
 print(f"Mean Number Inliers: {np.mean(inliers_number)} with confidence > {threshold}")
+print(f"Saved CSV: {csv_path}")
