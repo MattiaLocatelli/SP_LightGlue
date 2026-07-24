@@ -79,8 +79,9 @@ def read_keyframe_data(filepath, num_descriptors=256):
         f.seek(num_kpts * 8, os.SEEK_CUR)              # keypoints (cv::Point2f)
         f.seek(num_kpts * num_descriptors * 4, os.SEEK_CUR) # descriptors (float)
         
-        # Read rotation (9 floats = 36 bytes) and translation (3 floats = 12 bytes)
-        rotm = np.frombuffer(f.read(36), dtype=np.float32).reshape(3, 3)
+        # Read the pose from the tail of the file to stay robust to extra fields before it.
+        f.seek(-48, os.SEEK_END)
+        rotm = np.frombuffer(f.read(36), dtype=np.float32).reshape(3, 3, order='F')
         trans = np.frombuffer(f.read(12), dtype=np.float32)
         
         return rotm, trans
@@ -278,25 +279,23 @@ for img_name in offline_imgs:
             # Recover relative pose: keyframe -> online frame, matching the ROS convention.
             _, R_KF, t_KF, mask_pose = cv2.recoverPose(E, ptsK, ptsF, K)
             
-            # Transform relative pose to world coordinates using the keyframe pose.
+            # Transform the recovered relative rotation into the world frame, matching camera_worker.cpp.
             R_est_world = kf_rot @ R_KF.T
-            
-            # Match the ROS-style Euler ambiguity handling.
+
+            # Match the ROS-style Euler ambiguity handling used in camera_worker.cpp.
             rpy_hypothesis_0, rpy_hypothesis_1 = rotm2rpy_candidates(R_est_world)
-            yaw_est_0 = rpy_hypothesis_0[2]
-            yaw_est_1 = rpy_hypothesis_1[2]
-            
-            # Compare yaw against the online frame approximation, matching camera_worker.
             rpy_ref = rotm2rpy(approx_rot)
-            yaw_ref = rpy_ref[2]
-            
-            # Compute yaw error using the shortest angular distance.
-            yaw_err_0 = shortest_angular_distance_deg(yaw_est_0, yaw_ref)
-            yaw_err_1 = shortest_angular_distance_deg(yaw_est_1, yaw_ref)
-            chosen_rpy = rpy_hypothesis_0 if abs(yaw_err_0) < abs(yaw_err_1) else rpy_hypothesis_1
+
+            yaw_err_0 = abs(shortest_angular_distance_deg(rpy_hypothesis_0[2], rpy_ref[2]))
+            yaw_err_1 = abs(shortest_angular_distance_deg(rpy_hypothesis_1[2], rpy_ref[2]))
+            if yaw_err_0 <= yaw_err_1:
+                chosen_rpy = rpy_hypothesis_0
+            else:
+                chosen_rpy = rpy_hypothesis_1
+
             roll_err = shortest_angular_distance_deg(chosen_rpy[0], rpy_ref[0])
             pitch_err = shortest_angular_distance_deg(chosen_rpy[1], rpy_ref[1])
-            yaw_err = yaw_err_0 if abs(yaw_err_0) < abs(yaw_err_1) else yaw_err_1
+            yaw_err = shortest_angular_distance_deg(chosen_rpy[2], rpy_ref[2])
             
             # t_est_world = R_kf * R_KF.T * (-t_KF)
             t_est_world = kf_rot @ R_KF.T @ (-t_KF.flatten())
@@ -373,11 +372,11 @@ summary_rows = [
         "inliers": float(np.mean(inliers_geometric_number)),
         "inference_time_ms": float(sum(inference_times[1:])/(len(inference_times)-1)),
         "threshold": float(threshold),
-        "roll_error_deg": float(np.mean([row["roll_error_deg"] for row in csv_rows])),
-        "pitch_error_deg": float(np.mean([row["pitch_error_deg"] for row in csv_rows])),
-        "yaw_error_deg": float(np.mean([row["yaw_error_deg"] for row in csv_rows])),
-        "trans_error_deg": float(np.mean([row["trans_error_deg"] for row in csv_rows])),
-        "note": "Mean values",
+        "roll_error_deg": float(np.mean(np.abs([row["roll_error_deg"] for row in csv_rows]))),
+        "pitch_error_deg": float(np.mean(np.abs([row["pitch_error_deg"] for row in csv_rows]))),
+        "yaw_error_deg": float(np.mean(np.abs([row["yaw_error_deg"] for row in csv_rows]))),
+        "trans_error_deg": float(np.mean(np.abs([row["trans_error_deg"] for row in csv_rows]))),
+        "note": "Mean absolute values",
     },
     {
         "image_name": "__summary__",
