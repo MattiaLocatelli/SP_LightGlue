@@ -166,6 +166,6 @@ cython_debug/
 .idea/
 
 SPLG/
-Offline_Keyframes_Turn2-3/
+Offline_Keyframes_*/
 Online_Keyframe/
-output_matches/
+output_matches_*/
